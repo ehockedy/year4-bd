@@ -8,11 +8,12 @@ from nltk.stem.snowball import SnowballStemmer
 from keras.preprocessing import sequence
 from keras.models import Sequential
 from keras.layers import Dense, Embedding
-from keras.layers import LSTM
+from keras.layers import LSTM, SimpleRNN
 from keras.preprocessing.text import Tokenizer
 import tensorflow as tf
 import os
 import copy
+import random
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Runs on GPU, I think
 # https://stackoverflow.com/questions/47068709/your-cpu-supports-instructions-that-this-tensorflow-binary-was-not-compiled-to-u
 
@@ -38,10 +39,10 @@ def text_to_words(idx, data, stop=True, stem=False):
     return (" ".join(words))  # Return the words as one string
 
 
-def get_article_texts(csv_data, stem):
+def get_article_texts(csv_data, stop, stem):
     articles = []
     for i in range(0, csv_data["TEXT"].size):
-        article_main_words = text_to_words(i, csv_data, stem)
+        article_main_words = text_to_words(i, csv_data, stop, stem)
         # if len(article_main_words) > 1000:
         #     article_main_words = article_main_words[0:1000]
         # elif len(article_main_words) < 1000:
@@ -59,15 +60,6 @@ def get_article_classifications(csv_data):
     for i in range(0, csv_data["LABEL"].size):
         classifications.append(csv_data["LABEL"][i])
     return classifications
-
-#vec = nlp(text[0])
-#vec2 = nlp(text[1])
-
-#vocab = [lex.text for lex in nlp.vocab]
-#vocab.sort()
-#print(len(vocab))
-
-#print(len(vec.vector))
 
 
 def generate_w2v(text, nlp):
@@ -121,9 +113,8 @@ def remove_non_vectors(data_vec, classes):
     return data_vec, classes
 
 
-def split_data(data_vec, classes):
-    data_vec, classes = shuffle(data_vec, classes)
-    cutoff = int(len(data_vec)*0.8)
+def split_data(data_vec, classes, train_percentage):
+    cutoff = int(len(data_vec)*train_percentage)
     data_train = np.array(data_vec[0:cutoff])
     data_test = np.array(data_vec[cutoff:])
     class_train = np.array(classes[0:cutoff])
@@ -149,13 +140,14 @@ def generate_embedding_matrix(nlp, tokens):
         if vec.has_vector:
             vector_size = len(vec.vector)
         i += 1
-
-    embedding_matrix = np.zeros(shape=(len(tokens.items()), vector_size))
+    #print("LEN", len(tokens.items()))
+    embedding_matrix = np.zeros(shape=(len(tokens.items())+1, vector_size))
     for word, idx in tokens.items():
         if word in nlp.vocab:
             embedding_matrix[idx-1] = nlp(word).vector  # idx starts at 1, so -1 to offset
         else:
             embedding_matrix[idx-1] = [0 for i in range(0, vector_size)]
+        #embedding_matrix[len(tokens.items())+1] = [0 for i in range(0, vector_size)]
     #print(len(tokens.items()))
     return embedding_matrix
 
@@ -165,6 +157,9 @@ def keras_lstm(data_train, data_test, class_train, class_test, embed_mat):
     # Create LSTM
     # https://keras.io/getting-started/sequential-model-guide/
     # maybe for lstm https://blog.keras.io/a-ten-minute-introduction-to-sequence-to-sequence-learning-in-keras.html 
+    # Looks good http://www.volodenkov.com/post/keras-lstm-sentiment-p2/ 
+    # Very good https://www.kaggle.com/lystdo/lstm-with-word2vec-embeddings/code 
+    # Also potential http://www.orbifold.net/default/2017/01/10/embedding-and-tokenizer-in-keras/ 
     num_data = len(data_train)
     len_data = len(data_train[0])
     len_vec = 1000
@@ -307,70 +302,112 @@ def tensorflow_lstm(data_train, data_test, class_train, class_test):
             print("Testing Accuracy:", sess.run(error, feed_dict={in_ph: batch_x, out_ph: batch_y}))
             ptr += batch_size
 
-print("Loading spacy corpus")
-nlp = spacy.load('en')  # _core_web_lg')
 
-print("Loading data")
-data = pd.read_csv("news_ds.csv", header=0, nrows=500)
-text = get_article_texts(data, stem=False)  # Probably dont stem because capitals add context
-classes = get_article_classifications(data)
+def run_nn(lstm_not_rnn, data_size, use_all_data, save_embed, load_embed):
+    log = open("parameter_log.txt", "a")
 
-tokenizer = Tokenizer(50000)
-tokenizer.fit_on_texts(text)
+    print("Loading spacy corpus")
 
-#data_vectors = generate_w2v(text, nlp)
-#data_vectors, classes = remove_non_vectors(data_vectors, classes)
+    nlp_corpus = 'en' # en_core_web_lg
+    nlp = spacy.load(nlp_corpus)
 
-text = tokenizer.texts_to_sequences(text)
-text = sequence.pad_sequences(text, 1000, truncating='post')
+    print("Loading data")
+    data = pd.read_csv("news_ds.csv", header=0, nrows=data_size)
+    text = get_article_texts(data, stop=False, stem=False)  # Probably dont stem because capitals add context
+    classes = get_article_classifications(data)
+    #text, classes = shuffle(text, classes, random_state=0)
+    random.seed(0)
+    random.shuffle(classes)
+    random.seed(0)
+    random.shuffle(text)
+
+    train_percentage = 0.8
+    tokenizer = Tokenizer(50000)
+    len_dat_tr = int(len(text)*train_percentage)
+
+    if use_all_data:  # Use the words from the whole data set
+        tokenizer.fit_on_texts(text)  # Find the most common words
+    else:  # Use the words from just the training dataset
+        tokenizer.fit_on_texts(text[0:len_dat_tr])
+
+    text_ints = tokenizer.texts_to_sequences(text)  # Convert text to lists of integers, with each integer corresponding to a word
+    text_ints = sequence.pad_sequences(text_ints, 1000, truncating='post')  # Make all length 1000
+
+    print("Creating Embedded matrix")
+    if load_embed:
+        embed_mat = np.load("embed_mat_all_data_" + str(data_size) + ".npy")
+    else:
+        embed_mat = generate_embedding_matrix(nlp, tokenizer.word_index)  # Create the matrix that maps the word integers to their vectors
+
+    if save_embed:
+        np.save("embed_mat_all_data_"+str(data_size), embed_mat)
+
+    # THIS IS A TEMPORARY FIX, THERE ARE CASES OF THE INDEX OF A WORD TOKEN THING BEING LARGER (BY 1) THAN THE SIZE OF THE
+    # EMBEDDED MATRIX. CURRENTLY MAPPED TO ZERO, BUT THIS IS BAD SINCE 0 IS A SPECIFIC MAPPING
+    # https://github.com/tflearn/tflearn/issues/260
+    # https://github.com/tensorflow/tensorflow/issues/2734 
+    for i in range(0, len(text_ints)):
+        for j in range(0, len(text_ints[i])):
+            #print(j, len(embed_mat))
+            if text_ints[i][j] >= len(embed_mat):
+                text_ints[i][j] = int(len(embed_mat)-1)
+                print("TOO BIG")
+
+    data_train, data_test, class_train, class_test = split_data(text_ints, classes, train_percentage)  # Split into training and testing data
+
+    num_words = len(tokenizer.word_index.items())
+    vec_size = 0
+    i = 0
+    while vec_size == 0:
+        vec = nlp(nlp.vocab[i].text)
+        if vec.has_vector:
+            vec_size = len(vec.vector)
+        i += 1
+    len_data = 1000
+
+    model = Sequential()  # Sequential model is a linear stack of layers
+    model.add(Embedding(num_words+1, vec_size, weights=[embed_mat], input_length=len_data, trainable=False))
+
+    # Hyper params
+    num_nodes = 64
+    drop_prob = 0.0
+    activ = 'tanh'
+    num_epochs = 3
+    batch_size = 50  # 181  # 14, 18, 181, 362 are all factors of 5068, 181 is a factor of 1267
+
+    if lstm_not_rnn:
+        model.add(LSTM(num_nodes, dropout=drop_prob, recurrent_dropout=drop_prob, activation=activ))
+    else:
+        model.add(SimpleRNN(64, dropout=0.2, recurrent_dropout=0.2, activation='sigmoid'))
+    model.add(Dense(1, activation='sigmoid'))
+
+    # try using different optimizers and different optimizer configs
+    model.compile(loss='binary_crossentropy',
+                    optimizer='adam',
+                    metrics=['accuracy'])
+
+    model.fit(data_train, class_train,
+                batch_size=batch_size,
+                epochs=num_epochs)
+                # validation_data=(data_test, class_test))
+    score, acc = model.evaluate(data_test, class_test,
+                                batch_size=1)  # Use predict to get other measures
+
+    acc = 0
+    predictions = model.predict(data_test, 1, True)
+    for i in range(0, len(class_test)):
+        print(predictions[i], class_test[i])
+        if class_test[i] == round(predictions[i][0]):
+            acc += 1
+    print("Predict acc:", acc/len(predictions))
+
+    print("Score:", score, "Accuracy:", acc)
+    log.write("lstm_not_rnn:" + str(lstm_not_rnn) + ", data_size:" + str(data_size) + ", use_all_data:" + str(use_all_data) +
+        ", num_nodes:" + str(num_nodes) + ", drop_prob:" + str(drop_prob) + ", activ:" + activ + ", num_epochs:" + str(num_epochs) +
+        ", batch_size:" + str(batch_size) + ", nlp_corpus:" + nlp_corpus + ", accuracy:" + str(acc) + "\n")
 
 
-
-
-embed_mat = generate_embedding_matrix(nlp, tokenizer.word_index)
-
-
-# THIS IS A TEMPORARY FIX, THERE ARE CASES OF THE INDEX OF A WORD TOKEN THING BEING LARGER (BY 1) THAN THE SIZE OF THE
-# EMBEDDED MATRIX. CURRENTLY MAPPED TO ZERO, BUT THIS IS BAD SINCE 0 IS A SPECIFIC MAPPING
-# https://github.com/tflearn/tflearn/issues/260
-# https://github.com/tensorflow/tensorflow/issues/2734 
-for i in range(0, len(text)):
-    for j in range(0, len(text[i])):
-        #print(j, len(embed_mat))
-        if text[i][j] >= len(embed_mat):
-            text[i][j] = 0
-            print("TOO BIG")
-
-data_train, data_test, class_train, class_test = split_data(text, classes)
-
-num_words = len(tokenizer.word_index.items())
-vec_size = 0
-i = 0
-while vec_size == 0:
-    vec = nlp(nlp.vocab[i].text)
-    if vec.has_vector:
-        vec_size = len(vec.vector)
-    i += 1
-len_data = 1000
-
-model = Sequential()  # Sequential model is a linear stack of layers
-model.add(Embedding(num_words, vec_size, weights=[embed_mat], input_length=len_data, trainable=False))
-model.add(LSTM(128, dropout=0.2, recurrent_dropout=0.2, activation='sigmoid', recurrent_activation='sigmoid'))
-model.add(Dense(1, activation='sigmoid'))
-
-# try using different optimizers and different optimizer configs
-model.compile(loss='binary_crossentropy',
-                optimizer='adam',
-                metrics=['accuracy'])
-
-batch_size = 1
-model.fit(data_train, class_train,
-            batch_size=batch_size,
-            epochs=5,
-            validation_data=(data_test, class_test))
-score, acc = model.evaluate(data_test, class_test,
-                            batch_size=batch_size)
-
+run_nn(lstm_not_rnn=True, data_size=500, use_all_data=True, save_embed=False, load_embed=True)
 
 
 # Show tokens, ranked in order of frequency
@@ -384,3 +421,19 @@ score, acc = model.evaluate(data_test, class_test,
 #print(vocab)
 
 # Try this: https://github.com/keras-team/keras/blob/master/examples/imdb_lstm.py
+
+
+
+# rnn, all data, train size 400, test size 100, batch 10: 59%
+# rnn, train data, train size 400, test size 100, batch 10: 56%
+# lstm, all data, train size 400, test size 100, batch 10: 59%
+# lstm, train data, train size 400, test size 100, batch 10: 55%
+# lstm, train data, train size 800, test size 200, batch 10: 62%
+# lstm, train data, train size 800, test size 200, batch 5: 62%
+
+# Things to vary:
+# - Number of rnn/lstm layers
+# - Size of rnn/lstm layers
+# - Activation function
+# - Number of training epochs
+# - Batch size
