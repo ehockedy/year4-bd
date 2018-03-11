@@ -2,20 +2,25 @@ import pandas as pd
 import re
 from nltk.corpus import stopwords
 from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.utils import shuffle
 from sklearn.naive_bayes import MultinomialNB
+from nltk.stem.porter import PorterStemmer
 from nltk.stem.snowball import SnowballStemmer
+from sklearn.metrics import precision_recall_fscore_support
 
 
-def text_to_words(idx, data, stem):
+def text_to_words(idx, data, stem, stop, lower=True):
     article_1 = data["TEXT"][idx]  # Get the article text
 
     text = re.sub("[^a-zA-Z]", " ", article_1)  # Remove non-letters
-    text = text.lower()  # Convert to lowercase
+    if lower:
+        text = text.lower()  # Convert to lowercase
     words = text.split()  # Split into individual words
 
-    sw = set(stopwords.words("english"))  # Get English stop words
-    words = [w for w in words if not w in sw]  # Remove stop words
+    if stop:
+        sw = set(stopwords.words("english"))  # Get English stop words
+        words = [w for w in words if not w in sw]  # Remove stop words
 
     if stem:
         stemmer = SnowballStemmer("english")
@@ -27,10 +32,10 @@ def text_to_words(idx, data, stem):
     return (" ".join(words))  # Return the words as one string
 
 
-def get_article_texts(csv_data, stem):
+def get_article_texts(csv_data, stem, stop, lower=True):
     articles = []
     for i in range(0, csv_data["TEXT"].size):
-        article_main_words = text_to_words(i, csv_data, stem)
+        article_main_words = text_to_words(i, csv_data, stem, stop, lower)
         articles.append(article_main_words)
     return articles
 
@@ -63,25 +68,88 @@ def show_occurence_of_all_words(vocab, dist):
         print(i)
 
 
-def classify_nb():
+def classify_nb(data=None, technique=0, stop=True, stem=True, lower=True, random_state=0):
     # Read in data
-    data = pd.read_csv("news_ds.csv", header=0)
-
-    # Convert a collection of text documents to a matrix of token counts
-    vectorizer = CountVectorizer(analyzer="word",  # Whether words or character n-grams
-                                tokenizer=None,
-                                preprocessor=None,
-                                stop_words=None,
-                                max_features=4000)
+    if data is None:
+        print("Reading in data")
+        data = pd.read_csv("news_ds.csv", header=0)
+    log = open("parameter_log_NB.txt", "a")
+    technique_name = ""
+    if technique == 0:
+        # Convert a collection of text documents to a matrix of token counts
+        vectorizer = CountVectorizer(analyzer="word",  # Whether words or character n-grams
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000)
+        technique_name = "TF 1-gram    "
+    elif technique == 1:
+        vectorizer = TfidfVectorizer(analyzer="word",
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000)
+        technique_name = "TF-IDF 1-gram"                                     
+    elif technique == 2:
+        vectorizer = CountVectorizer(analyzer="word",  # Whether words or character n-grams
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000,
+                                     ngram_range=(2, 2))
+        technique_name = "TF 2-gram    "                         
+    elif technique == 3:
+        vectorizer = TfidfVectorizer(analyzer="word",  # Whether words or character n-grams
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000,
+                                     ngram_range=(2, 2))
+        technique_name = "TF-IDF 2-gram"
+    elif technique == 4:
+        vectorizer = CountVectorizer(analyzer="word",  # Whether words or character n-grams
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000,
+                                     ngram_range=(4, 4))
+        technique_name = "TF 4-gram    "
+    elif technique == 5:
+        vectorizer = TfidfVectorizer(analyzer="word",  # Whether words or character n-grams
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000,
+                                     ngram_range=(4, 4))
+        technique_name = "TF-IDF 4-gram"          
+    elif technique == 6:
+        vectorizer = TfidfVectorizer(analyzer="word",  # Whether words or character n-grams
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000,
+                                     ngram_range=(1, 4))
+        technique_name = "TF-IDF 1to4-gram"  
+    elif technique == 7:
+        vectorizer = CountVectorizer(analyzer="word",  # Whether words or character n-grams
+                                     tokenizer=None,
+                                     preprocessor=None,
+                                     stop_words=None,
+                                     max_features=4000,
+                                     ngram_range=(1, 4))
+        technique_name = "TF 1to4-gram    " 
 
     # Get important words from each document
-    text = get_article_texts(data, stem=True)
+
+    print("Cleaning text")
+    text = get_article_texts(data, stem, stop, lower)
     classes = get_article_classifications(data)
 
-    data_train, data_classes = shuffle(text, classes)
+    data_train, data_classes = shuffle(text, classes, random_state=random_state)
 
     # Generate the feature vectors - arrays that hold the number of times each
     # word, out of all words in all articles, appear in this article
+    print("Generating term-document matrix")
     data_features = vectorizer.fit_transform(data_train)  # Get the term-document matrix
     data_features = data_features.toarray()
     # vocab_train = vectorizer.get_feature_names()  # Map from feature integer indices to feature name
@@ -99,10 +167,14 @@ def classify_nb():
 
     # Train NB classifier
     nb = MultinomialNB()
+    print("Training classifier")
     nb.fit(train_data_features, train_classes)
 
     # Test NB classifier
     predictions = nb.predict(test_data_features)
+
+    precision, recall, fscore, _ = precision_recall_fscore_support(test_classes, predictions)
+
     count = 0
     for i in range(0, len(predictions)):
         if predictions[i] == test_classes[i]:
@@ -110,5 +182,29 @@ def classify_nb():
 
     # Pring percentage correct
     print(count/len(predictions))
+    log.write("Technique: " + technique_name + ", Stem:" + str(stem) + ", Stop:" + str(stop) + ", Lower:" + str(lower) + " Accuracy:" + str(count/len(predictions)) + 
+              ", Precision:" + str(precision) + ", Recall:" + str(recall) + ", Fscore:" + str(fscore) + "\n")
 
-classify_nb()
+
+data = pd.read_csv("news_ds.csv", header=0)
+print("Reading in data")
+options = [True, False] 
+for o in options:  # Stem
+    for o2 in options:  # Stop
+        for i in range(6, 8):
+            classify_nb(data, i, o, o2, True, 0)
+            classify_nb(data, i, o, o2, True, 1)
+            classify_nb(data, i, o, o2, True, 2)
+classify_nb(data, 1, True, True, lower=False, random_state=0)
+classify_nb(data, 1, True, True, lower=False, random_state=1)
+classify_nb(data, 1, True, True, lower=False, random_state=2)
+
+# TODO
+# Try with different stemmer
+# Precision, recall, F1
+# Run again with random training sets, then find average
+
+
+# Test:
+# -  Porter stemmer
+# - 1-4 ngram

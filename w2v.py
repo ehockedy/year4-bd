@@ -5,6 +5,7 @@ import numpy as np
 from sklearn.utils import shuffle
 from nltk.corpus import stopwords
 from nltk.stem.snowball import SnowballStemmer
+from nltk.stem.porter import PorterStemmer
 from keras.preprocessing import sequence
 from keras.models import Sequential
 from keras.layers import Dense, Embedding
@@ -12,26 +13,32 @@ from keras.layers import LSTM, SimpleRNN
 from keras.preprocessing.text import Tokenizer
 import tensorflow as tf
 import os
-import copy
+import time
 import random
+from sklearn.metrics import precision_recall_fscore_support
+
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Runs on GPU, I think
 # https://stackoverflow.com/questions/47068709/your-cpu-supports-instructions-that-this-tensorflow-binary-was-not-compiled-to-u
 
-def text_to_words(idx, data, stop=True, stem=False):
+def text_to_words(idx, data, stop=True, stem=False, nlp=None, lower=True):
     article_1 = data["TEXT"][idx]  # Get the article text
 
     text = re.sub("[^a-zA-Z]", " ", article_1)  # Remove non-letters
-    text = text.lower()  # Convert to lowercase
+    if lower:
+        text = text.lower()  # Convert to lowercase
     words = text.split()  # Split into individual words
 
     if stop:
         sw = set(stopwords.words("english"))  # Get English stop words
-        words = [w for w in words if not w in sw]  # Remove stop words
+        words = [w for w in words if w not in sw]  # Remove stop words
 
-    words = words[0:1000]  # Limit to 1000 words
+    #if nlp is not None:
+    #    words = [w for w in words if nlp(w).has_vector]
+    #words = words[0:1000]  # Limit to 1000 words
 
     if stem:
-        stemmer = SnowballStemmer("english")
+        #stemmer = SnowballStemmer("english")
+        stemmer = PorterStemmer()
         stemmed = []
         for w in range(0, len(words)):
             stemmed.append(stemmer.stem(words[w]))
@@ -39,10 +46,10 @@ def text_to_words(idx, data, stop=True, stem=False):
     return (" ".join(words))  # Return the words as one string
 
 
-def get_article_texts(csv_data, stop, stem):
+def get_article_texts(csv_data, stop, stem, nlp, lower):
     articles = []
     for i in range(0, csv_data["TEXT"].size):
-        article_main_words = text_to_words(i, csv_data, stop, stem)
+        article_main_words = text_to_words(i, csv_data, stop, stem, nlp, lower)
         # if len(article_main_words) > 1000:
         #     article_main_words = article_main_words[0:1000]
         # elif len(article_main_words) < 1000:
@@ -144,9 +151,10 @@ def generate_embedding_matrix(nlp, tokens):
     embedding_matrix = np.zeros(shape=(len(tokens.items())+1, vector_size))
     for word, idx in tokens.items():
         if word in nlp.vocab:
-            embedding_matrix[idx-1] = nlp(word).vector  # idx starts at 1, so -1 to offset
-        else:
-            embedding_matrix[idx-1] = [0 for i in range(0, vector_size)]
+            embedding_matrix[idx] = nlp(word).vector  # dont offset to idx-1, since 0 is reserved
+        #else:
+        #    print(word, idx)
+        #    embedding_matrix[idx] = [0 for j in range(0, vector_size)]
         #embedding_matrix[len(tokens.items())+1] = [0 for i in range(0, vector_size)]
     #print(len(tokens.items()))
     return embedding_matrix
@@ -303,17 +311,22 @@ def tensorflow_lstm(data_train, data_test, class_train, class_test):
             ptr += batch_size
 
 
-def run_nn(lstm_not_rnn, data_size, use_all_data, save_embed, load_embed):
+def run_nn(data_size, use_all_data, save_embed, load_embed,
+           lstm_not_rnn=True, nodes=128, dp=0.0, act_func='sigmoid',
+           num_e=10, b_size=24, two_lstm=False, num_tokens=20000,
+           stop=True, stem=False, lower=True):
     log = open("parameter_log.txt", "a")
 
     print("Loading spacy corpus")
 
-    nlp_corpus = 'en' # en_core_web_lg
+    nlp_corpus = "en_core_web_lg"  # "en_vectors_web_lg"
     nlp = spacy.load(nlp_corpus)
 
+    if data_size is None:
+        data_size = 5068  # Length of whole data
     print("Loading data")
     data = pd.read_csv("news_ds.csv", header=0, nrows=data_size)
-    text = get_article_texts(data, stop=False, stem=False)  # Probably dont stem because capitals add context
+    text = get_article_texts(data, stop, stem, nlp=nlp, lower=lower)  # Probably dont stem because capitals add context
     classes = get_article_classifications(data)
     #text, classes = shuffle(text, classes, random_state=0)
     random.seed(0)
@@ -322,7 +335,7 @@ def run_nn(lstm_not_rnn, data_size, use_all_data, save_embed, load_embed):
     random.shuffle(text)
 
     train_percentage = 0.8
-    tokenizer = Tokenizer(50000)
+    tokenizer = Tokenizer(num_tokens)
     len_dat_tr = int(len(text)*train_percentage)
 
     if use_all_data:  # Use the words from the whole data set
@@ -331,7 +344,7 @@ def run_nn(lstm_not_rnn, data_size, use_all_data, save_embed, load_embed):
         tokenizer.fit_on_texts(text[0:len_dat_tr])
 
     text_ints = tokenizer.texts_to_sequences(text)  # Convert text to lists of integers, with each integer corresponding to a word
-    text_ints = sequence.pad_sequences(text_ints, 1000, truncating='post')  # Make all length 1000
+    text_ints = sequence.pad_sequences(text_ints, 1000, truncating='pre')  # Make all length 1000
 
     print("Creating Embedded matrix")
     if load_embed:
@@ -342,20 +355,22 @@ def run_nn(lstm_not_rnn, data_size, use_all_data, save_embed, load_embed):
     if save_embed:
         np.save("embed_mat_all_data_"+str(data_size), embed_mat)
 
+
     # THIS IS A TEMPORARY FIX, THERE ARE CASES OF THE INDEX OF A WORD TOKEN THING BEING LARGER (BY 1) THAN THE SIZE OF THE
     # EMBEDDED MATRIX. CURRENTLY MAPPED TO ZERO, BUT THIS IS BAD SINCE 0 IS A SPECIFIC MAPPING
     # https://github.com/tflearn/tflearn/issues/260
     # https://github.com/tensorflow/tensorflow/issues/2734 
-    for i in range(0, len(text_ints)):
-        for j in range(0, len(text_ints[i])):
-            #print(j, len(embed_mat))
-            if text_ints[i][j] >= len(embed_mat):
-                text_ints[i][j] = int(len(embed_mat)-1)
-                print("TOO BIG")
+    # for i in range(0, len(text_ints)):
+    #     for j in range(0, len(text_ints[i])):
+    #         #print(j, len(embed_mat))
+    #         if text_ints[i][j] >= len(embed_mat):
+    #             text_ints[i][j] = int(len(embed_mat)-1)
+    #             print("TOO BIG")
 
     data_train, data_test, class_train, class_test = split_data(text_ints, classes, train_percentage)  # Split into training and testing data
 
-    num_words = len(tokenizer.word_index.items())
+    #num_words = len(tokenizer.word_index.items())
+    #print((num_words))
     vec_size = 0
     i = 0
     while vec_size == 0:
@@ -365,20 +380,28 @@ def run_nn(lstm_not_rnn, data_size, use_all_data, save_embed, load_embed):
         i += 1
     len_data = 1000
 
+    #print(len(embed_mat))
+    num_words = len(embed_mat)
+
     model = Sequential()  # Sequential model is a linear stack of layers
-    model.add(Embedding(num_words+1, vec_size, weights=[embed_mat], input_length=len_data, trainable=False))
+    model.add(Embedding(num_words, vec_size, weights=[embed_mat], input_length=len_data, trainable=False))
 
     # Hyper params
-    num_nodes = 64
-    drop_prob = 0.0
-    activ = 'tanh'
-    num_epochs = 3
-    batch_size = 50  # 181  # 14, 18, 181, 362 are all factors of 5068, 181 is a factor of 1267
+    num_nodes = nodes  # 64
+    drop_prob = dp  # 0.0
+    activ = act_func  #'sigmoid'
+    num_epochs = num_e
+    batch_size = b_size #181#24  # 181  # 14, 18, 181, 362 are all factors of 5068, 181 is a factor of 1267
+    two_lstm_layers = two_lstm
 
     if lstm_not_rnn:
-        model.add(LSTM(num_nodes, dropout=drop_prob, recurrent_dropout=drop_prob, activation=activ))
+        if two_lstm_layers:
+            model.add(LSTM(num_nodes, dropout=drop_prob, recurrent_dropout=drop_prob, activation=activ, return_sequences=True))
+            model.add(LSTM(num_nodes, dropout=drop_prob, recurrent_dropout=drop_prob, activation=activ))
+        else:
+            model.add(LSTM(num_nodes, dropout=drop_prob, recurrent_dropout=drop_prob, activation=activ))
     else:
-        model.add(SimpleRNN(64, dropout=0.2, recurrent_dropout=0.2, activation='sigmoid'))
+        model.add(SimpleRNN(64, dropout=drop_prob, recurrent_dropout=drop_prob, activation='sigmoid'))
     model.add(Dense(1, activation='sigmoid'))
 
     # try using different optimizers and different optimizer configs
@@ -386,29 +409,73 @@ def run_nn(lstm_not_rnn, data_size, use_all_data, save_embed, load_embed):
                     optimizer='adam',
                     metrics=['accuracy'])
 
+    # Loss is a summation of the errors made for each example in training or validation sets
+    start_time = time.time()
     model.fit(data_train, class_train,
                 batch_size=batch_size,
                 epochs=num_epochs)
                 # validation_data=(data_test, class_test))
+    train_time = time.time()
     score, acc = model.evaluate(data_test, class_test,
                                 batch_size=1)  # Use predict to get other measures
-
-    acc = 0
+    classification_time = time.time()
+    # acc2 = 0
     predictions = model.predict(data_test, 1, True)
-    for i in range(0, len(class_test)):
-        print(predictions[i], class_test[i])
-        if class_test[i] == round(predictions[i][0]):
-            acc += 1
-    print("Predict acc:", acc/len(predictions))
+    # for i in range(0, len(class_test)):
+    #     print(predictions[i], class_test[i])
+    #     if class_test[i] == round(predictions[i][0]):
+    #         acc2 += 1
+    # print("Predict acc:", acc2/len(predictions))
+    precision, recall, fscore, _ = precision_recall_fscore_support(class_test, predictions.round())
 
+    stemmer_type = "Porter"
     print("Score:", score, "Accuracy:", acc)
     log.write("lstm_not_rnn:" + str(lstm_not_rnn) + ", data_size:" + str(data_size) + ", use_all_data:" + str(use_all_data) +
         ", num_nodes:" + str(num_nodes) + ", drop_prob:" + str(drop_prob) + ", activ:" + activ + ", num_epochs:" + str(num_epochs) +
-        ", batch_size:" + str(batch_size) + ", nlp_corpus:" + nlp_corpus + ", accuracy:" + str(acc) + "\n")
+        ", batch_size:" + str(batch_size) + ", two_lstm_layers:" + str(two_lstm_layers) +
+        ", stop:" + str(stop) + ", stem:" + str(stem) + ", train_time:" + str(train_time - start_time) + ", test_time:" + str(classification_time - train_time) +
+        ", stemmer_type:" + stemmer_type + 
+        ", accuracy:" + str(acc) + ", loss:" + str(score) + ", precision:" + str(precision) + ", recall:" + str(recall) + ", fscore" + str(recall) + "\n")
+        # ", nlp_corpus:" + nlp_corpus + ", num_tokens:" + str(num_tokens) + 
 
+# Best Params
+# Nodes = 32*
+# Epochs = 10
+# Batch = 24
+# Num layers = ??? 
+# Activation = sigmoid
+# LSTM = yes
+# Stem = False
+# Stop = False
+# Dropout = 0
 
-run_nn(lstm_not_rnn=True, data_size=500, use_all_data=True, save_embed=False, load_embed=True)
+#node_vals = [25, 32, 45]
+#num_e_vals = [4, 10]
+#b_size_vals = [24, 181]
+stop_vals = [True, False]
+stem_vals = [True, False]
 
+# #for n in node_vals:
+# for i in stop_vals:
+#     for j in stem_vals:
+#         for k in stem_vals:  # Lowercase
+#             run_nn(data_size=5068, use_all_data=False, save_embed=False, load_embed=True,lstm_not_rnn=False, nodes=32, num_e=10, b_size=24, stop=i, stem=j, lower=k)
+
+num_layers = [True, False]
+dropout = [0, 0.1, 0.2]
+num_nodes = [25, 32, 40]
+# for t in num_layers:
+#     for d in dropout:
+#         for nn in num_nodes:
+
+# run_nn(data_size=5068, use_all_data=False, save_embed=False, load_embed=True, nodes=32, dp=0, two_lstm=False, stop=False, num_e=1)
+# run_nn(data_size=5068, use_all_data=False, save_embed=False, load_embed=True, nodes=32, dp=0, two_lstm=False, stop=False, num_e=4)
+# run_nn(data_size=5068, use_all_data=False, save_embed=False, load_embed=True, nodes=32, dp=0, two_lstm=False, stop=False, num_e=7)
+# run_nn(data_size=5068, use_all_data=False, save_embed=False, load_embed=True, nodes=32, dp=0, two_lstm=False, stop=False, num_e=10)
+# run_nn(data_size=5068, use_all_data=False, save_embed=False, load_embed=True, nodes=32, dp=0, two_lstm=False, stop=False, b_size=1)
+
+if __name__== "__main__":
+    run_nn(data_size=5068, use_all_data=False, save_embed=False, load_embed=False, nodes=32, num_e=7, two_lstm=False,stem=False, stop=False, num_tokens=None, b_size=24)
 
 # Show tokens, ranked in order of frequency
 #for word, i in tokenizer.word_index.items():
@@ -437,3 +504,12 @@ run_nn(lstm_not_rnn=True, data_size=500, use_all_data=True, save_embed=False, lo
 # - Activation function
 # - Number of training epochs
 # - Batch size
+# - Stemming, 
+
+#TODO:
+# - try bigger vocabulary
+# - try more tokens (CURRENTLY WRITTEN CODE)
+# - Report
+
+# Observations
+# RNN is faster to train than LSTM
